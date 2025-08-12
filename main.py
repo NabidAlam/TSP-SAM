@@ -206,3 +206,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
+    
+#     cd tspsam
+# python main.py --dataset DAVIS --test_path ..\input\davis2017\JPEGImages\480p --output_dir ..\output\tsp_sam\davis --resume model_checkpoint\best_checkpoint.pth --sequence hike --gpu_ids 0
+# cd ..
+
+# cd samurai
+# python samurai/scripts/demo.py --video_path "input/davis2017/JPEGImages/480p/dog" --txt_path "input/davis2017/bboxes/bbox_dog.txt" --model_path "samurai/sam2/checkpoints/sam2.1_hiera_base_plus.pt"    
+
+
+# python evaluation\davis_baseline_eval.py --method tsp-sam --sequences hike
