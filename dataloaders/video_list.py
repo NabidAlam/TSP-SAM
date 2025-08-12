@@ -76,177 +76,178 @@ def colorEnhance(imgs, imgs_ycbcr):
         imgs_ycbcr[i] = ImageEnhance.Sharpness(imgs_ycbcr[i]).enhance(sharp_intensity)
     return imgs, imgs_ycbcr
 
-def randomPeper(img):
-    img = np.array(img)
-    noiseNum = int(0.0015 * img.shape[0] * img.shape[1])
+class dataLoader(data.Dataset):
+    # preload data into memory
+    def __init__(self, data_root, split='train', imgsize=352, clip_n=3, is_gray=False, name=None, scene=None):
+        
+        self.split = split
+        self.is_gray = is_gray
+        self.imgsize = imgsize
+        self.clip_n = clip_n
 
-    for i in range(noiseNum):
-        randX = random.randint(0, img.shape[0] - 1)
-        randY = random.randint(0, img.shape[1] - 1)
-
-        if random.randint(0, 1) == 0:
-            img[randX, randY] = 0
-        else:
-            img[randX, randY] = 255       
-    return Image.fromarray(img)
-
-def generate_point(img):
-    original_size = img.shape
-    if img.max() == 0:
-        return np.array([0, 0, 0, 0]), original_size
-    contours, _ = cv2.findContours(img, cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
-
-    contour = max(contours, key=cv2.contourArea)
-    (x, y, w, h) = cv2.boundingRect(contour)
-    box = [x, y, x+w, y+h]
-
-    return np.array(box), original_size
-
-class VideoDataset(data.Dataset):
-    def __init__(self, dataset='MoCA', trainsize=256, window_length=10, split='MoCA-Video-Train'):
-        self.trainsize = trainsize
-        self.window_length = window_length
         self.image_list = []
-        self.gt_list = []
         self.extra_info = []
-
-        if dataset == 'MoCA': 
-            root = Path.db_root_dir('MoCA')
-            img_format = '*.jpg'
-            
-        elif dataset == 'CAD2016':    
-            root = Path.db_root_dir('CAD2016')
-            img_format = '*.png'
-
-        data_root = osp.join(root, split)
-
-        for scene in os.listdir(osp.join(data_root)):
-            if split=='MoCA-Video-Train':
-                images  = sorted(glob(osp.join(data_root, scene, 'Frame', img_format)))
-            elif split=='TrainDataset_per_sq':
-                images  = sorted(glob(osp.join(data_root, scene, 'Imgs', img_format)))
-            gt_list = sorted(glob(osp.join(data_root, scene, 'GT', '*.png')))
-            # pdb.set_trace()
-
-            begin_frame = self.window_length - 1
-            for i in range(begin_frame, len(images)):
-                self.extra_info += [(scene, i)]
-                self.gt_list += [gt_list[i]]
-                self.image_list += [images[i - begin_frame : i+1]]
-
-        # transforms
-        self.img_transform = transforms.Compose([
-            transforms.Resize((self.trainsize, self.trainsize)),
+        self.name = name
+        self.scene = scene
+        
+        if split == 'train':
+            self.image_list = [osp.join(data_root, i) for i in os.listdir(data_root) if i.endswith('.jpg')]
+            self.label_list = [osp.join(data_root.replace('TrainDataset', 'TrainDataset_GT'), i[:-4] + '.png') for i in os.listdir(data_root) if i.endswith('.jpg')]
+        elif split == 'test':
+            if name is not None:
+                if scene is not None:
+                    self.image_list = [osp.join(data_root, scene, name)]
+                else:
+                    self.image_list = [osp.join(data_root, name)]
+            else:
+                self.image_list = [osp.join(data_root, i) for i in os.listdir(data_root) if i.endswith('.avi') or i.endswith('.mp4')]
+        
+        self.image_list.sort()
+        if split == 'train':
+            self.label_list.sort()
+            assert len(self.image_list) == len(self.label_list)
+        
+        self.transform = transforms.Compose([
+            transforms.Resize((self.imgsize, self.imgsize)),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
-        self.transform = transforms.Compose([
-            transforms.Resize((self.trainsize, self.trainsize)),
+        self.gt_transform = transforms.Compose([
+            transforms.Resize((self.imgsize, self.imgsize)),
             transforms.ToTensor()])
+        self.loop_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+        self.size = len(self.image_list)
 
-    def __getitem__(self, index):
-        imgs = []
-        imgs_ycbcr = []
-        names= []
-        index = index % len(self.image_list)
+    def __getitem__(self, item):
+        # for data
+        if self.split == 'train':
+            data = Image.open(self.image_list[item]).convert('RGB')
+            data = self.transform(data).unsqueeze(0)
 
-        for i in range(len(self.image_list[index])):
-            imgs += [self.rgb_loader(self.image_list[index][i])]
-        for i in range(len(self.image_list[index])-3, len(self.image_list[index])):  
-            imgs_ycbcr += [self.ycbcr_loader(self.image_list[index][i])]
+            label = Image.open(self.label_list[item]).convert('L')
+            label = self.gt_transform(label).unsqueeze(0)
+        else:
+            try:
+                input_avi = cv2.VideoCapture(self.image_list[item])
+            except:
+                print(self.image_list[item])
+            target_fps = round(input_avi.get(cv2.CAP_PROP_FPS))
+            frame_num = 0
+            image_seq = []
+            while (input_avi.isOpened()):
+                ret, frame = input_avi.read()
+                if ret:
+                    frame_num = frame_num + 1
+                    image_seq.append(frame)
+                    if frame_num % 1000 == 0:
+                        print(frame_num)
+                else:
+                    break
+            input_avi.release()
+            data = []
+            for i in range(len(image_seq)):
+                data.append(self.loop_transform(Image.fromarray(cv2.cvtColor(image_seq[i], cv2.COLOR_BGR2RGB))).unsqueeze(0))
 
-        scene = self.image_list[index][-1].split('/')[-3] 
-        name = self.image_list[index][-1].split('/')[-1]
-        gt = self.binary_loader(self.gt_list[index])
-        
-        imgs, imgs_ycbcr, gt = cv_random_flip(imgs, imgs_ycbcr, gt)
-        imgs, imgs_ycbcr, gt = randomCrop(imgs, imgs_ycbcr, gt)
-        imgs, imgs_ycbcr, gt = randomRotation(imgs, imgs_ycbcr, gt)
-        imgs, imgs_ycbcr = colorEnhance(imgs, imgs_ycbcr)
-        gt = randomPeper(gt)
-        imgs_sam = copy.deepcopy(imgs[-1])
-        for i in range(len(imgs)):
-            imgs[i] = self.img_transform(imgs[i])
-        for i in range(len(imgs_ycbcr)):
-            imgs_ycbcr[i] = self.img_transform(imgs_ycbcr[i])
-        imgs_sam = self.transform(imgs_sam) * 255.0
-        gt = self.transform(gt)
-        
-        point, _ = generate_point(np.array(gt[0, :, :] * 255).astype(np.uint8))
-        point = point / (self.trainsize, self.trainsize, self.trainsize, self.trainsize)
-        
-        return imgs, imgs_ycbcr, imgs_sam, gt, point
+            label = self.image_list[item].split('/')[-1]
 
-    def rgb_loader(self, path):
-        with open(path, 'rb') as f:
-            img = Image.open(f)
-            return img.convert('RGB')
-
-    def binary_loader(self, path):
-        with open(path, 'rb') as f:
-            img = Image.open(f)
-            return img.convert('L') 
-            
-    def ycbcr_loader(self, path):
-        with open(path, 'rb') as f:
-            img = Image.open(f)
-            return img.convert('YCbCr')
+        return self.image_list[item], data, label
 
     def __len__(self):
-        return len(self.image_list)
+        return self.size
 
-# dataloader for training
-def get_loader(dataset, batchsize, trainsize, train_split, window_length,
-    shuffle=True, num_workers=12, pin_memory=False):
-    dataset = VideoDataset(dataset, trainsize, window_length, split=train_split)
-    
-    data_loader = data.DataLoader(dataset=dataset,
-                                  batch_size=batchsize,
-                                  shuffle=shuffle,
-                                  num_workers=num_workers,
-                                  pin_memory=pin_memory)
-    return data_loader
 
-class test_dataset:
-    def __init__(self, dataset='MoCA', split='TestDataset_per_sq', testsize=256):
+
+def generate_point(mask):
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) == 0:
+        return np.array([mask.shape[1]//2, mask.shape[0]//2]), mask.shape
+    else:
+        area = []
+        for j in range(len(contours)):
+            area.append(cv2.contourArea(contours[j]))
+        max_idx = np.argmax(area)
+        M = cv2.moments(contours[max_idx])
+        cx = int(M['m10']/M['m00'])
+        cy = int(M['m01']/M['m00'])
+        return np.array([cx, cy]), mask.shape
+
+class test_dataset(data.Dataset):
+    def __init__(self, dataset, testsize=352, test_path=None, sequence=None, grid=8):
+        self.dataset = dataset
         self.testsize = testsize
+        self.grid = grid
         self.image_list = []
         self.gt_list = []
-
-        if dataset == 'CAD2016':    
-            root = Path.db_root_dir('CAD2016')
-            img_format = '*.png'
-
-            for scene in os.listdir(osp.join(root)):
-                images  = sorted(glob(osp.join(root, scene, 'frames', img_format)))
-                gt_list = sorted(glob(osp.join(root, scene, 'pseudo', '*.png')))
-                
-                begin_frame = 2
-                for i in range(begin_frame, len(images)):
-                    self.gt_list    += [ gt_list[i] ]
-                    self.image_list += [ [images[i-2], 
-                                       images[i-1], 
-                                       images[i]] ]
-
-        else: 
-            root = Path.db_root_dir('MoCA')
-            img_format = '*.jpg'
-            data_root = osp.join(root, split)
-
+        
+        if dataset == 'MoCA':
+            data_root = Path.db_root_dir('MoCA') + 'TestDataset_per_sq'
             for scene in sorted(os.listdir(osp.join(data_root))):
-                if split=='MoCA-Video-Test' or split=='MoCA-Video-Train':
-                    images  = sorted(glob(osp.join(data_root, scene, 'Frame', img_format)))
-                elif split=='TestDataset_per_sq':
-                    images  = sorted(glob(osp.join(data_root, scene, 'Imgs', img_format)))
-                gt_list = sorted(glob(osp.join(data_root, scene, 'GT', '*.png')))
-
-                begin_frame = 2
-                for i in range(begin_frame, len(images)):
-                    self.gt_list    += [ gt_list[i] ]
-                    self.image_list += [ [images[i-2], 
-                                       images[i-1], 
-                                       images[i]] ]
-
-        # transforms
+                image_root = osp.join(data_root, scene)
+                gt_root = image_root.replace('TestDataset_per_sq', 'TestDataset_GT_per_sq')
+                img_list = sorted(glob(osp.join(image_root, '*.jpg')))
+                gt_list = sorted(glob(osp.join(gt_root, '*.png')))
+                for i in range(0, len(img_list), 3):
+                    if len(img_list[i:i+3]) == 3:
+                        self.image_list += [img_list[i:i+3]]
+                        self.gt_list += [gt_list[i+1]]
+        elif dataset == 'CAD2016':
+            data_root = Path.db_root_dir('CAD2016')
+            for scene in sorted(os.listdir(osp.join(data_root, 'img'))):
+                image_root = osp.join(data_root, 'img', scene)
+                gt_root = osp.join(data_root, 'gt', scene)
+                img_list = sorted(glob(osp.join(image_root, '*.jpg')))
+                gt_list = sorted(glob(osp.join(gt_root, '*.png')))
+                for i in range(0, len(img_list), 3):
+                    if len(img_list[i:i+3]) == 3:
+                        self.image_list += [img_list[i:i+3]]
+                        self.gt_list += [gt_list[i+1]]
+        elif dataset == 'DAVIS':
+            # Load from provided test_path / sequence
+            if test_path is None or sequence is None:
+                raise ValueError("For DAVIS, provide --test_path and --sequence")
+            image_root = osp.join(test_path, sequence)
+            gt_root = osp.join(test_path.replace('JPEGImages', 'Annotations'), sequence)
+            img_list = sorted(glob(osp.join(image_root, '*.jpg')))
+            gt_list = sorted(glob(osp.join(gt_root, '*.png'))) if os.path.exists(gt_root) else [None] * len(img_list)
+            for i in range(len(img_list)):
+                # For TSP-SAM, process in clips of 3 frames if possible, else single
+                clip = img_list[max(0, i-1):min(len(img_list), i+2)]
+                # Pad clip to 3 frames if shorter by duplicating the last frame
+                while len(clip) < 3:
+                    clip.append(clip[-1])  # Duplicate last
+                self.image_list += [clip]
+                self.gt_list += [gt_list[i] if gt_list[i] else None]
+        elif dataset == 'TED':
+            # Assume MP4 videos; extract frames on-the-fly
+            if test_path is None or sequence is None:
+                raise ValueError("For TED, provide --test_path and --sequence (e.g., video1.mp4)")
+            video_path = osp.join(test_path, sequence)
+            cap = cv2.VideoCapture(video_path)
+            frame_list = []
+            frame_num = 0
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    frame_path = f'temp_frame_{frame_num}.jpg'  # Temp save or in-memory
+                    cv2.imwrite(frame_path, frame)
+                    frame_list.append(frame_path)
+                    frame_num += 1
+                else:
+                    break
+            cap.release()
+            # No GT for TED
+            gt_list = [None] * len(frame_list)
+            for i in range(len(frame_list)):
+                clip = frame_list[max(0, i-1):min(len(frame_list), i+2)]
+                while len(clip) < 3:
+                    clip.append(clip[-1])  # Duplicate last
+                self.image_list += [clip]
+                self.gt_list += [gt_list[i]]
+            # Clean temp frames if needed
+        else:
+            raise NotImplementedError(f"Dataset {dataset} not supported")
+        
         self.img_transform = transforms.Compose([
             transforms.Resize((self.testsize, self.testsize)),
             transforms.ToTensor(),
@@ -274,13 +275,23 @@ class test_dataset:
             imgs_sam[i] = (self.img_sam_transform(imgs_sam[i]) * 255.0).unsqueeze(0)
             imgs_ycbcr[i] = self.img_transform(imgs_ycbcr[i]).unsqueeze(0)
             
-        scene = self.image_list[self.index][-1].split('/')[-3]  
-        name = self.image_list[self.index][-1].split('/')[-1]
-        gt = self.binary_loader(self.gt_list[self.index])
-        gt = self.transform(gt)
+        # Robust scene extraction
+        path_parts = self.image_list[self.index][-1].split(os.sep) if os.sep in self.image_list[self.index][-1] else self.image_list[self.index][-1].split('/')
+        scene = path_parts[-3] if len(path_parts) >= 3 else self.dataset  # Fallback to dataset name if path short
         
-        points, original_size = generate_point(np.array(gt[0, :, :] * 255).astype(np.uint8))
-        points = points / (original_size[1], original_size[0], original_size[1], original_size[0])
+        name = path_parts[-1]
+        gt = self.binary_loader(self.gt_list[self.index]) if self.gt_list[self.index] else None
+        gt = self.transform(gt) if gt is not None else None
+        
+        if gt is not None:
+            gt_array = np.array(gt[0, :, :] * 255).astype(np.uint8)
+            points, original_size = generate_point(gt_array)
+        else:
+            points = np.array([self.testsize//2, self.testsize//2])
+            original_size = (self.testsize, self.testsize)
+        
+        # Normalize points to [0,1] range
+        points = np.array([points[0] / original_size[1], points[1] / original_size[0]])
         
         self.index += 1
         self.index = self.index % self.size
@@ -326,4 +337,3 @@ class EvalDataset(data.Dataset):
 
     def __len__(self):
         return len(self.image_path)
-        
